@@ -1,6 +1,7 @@
 import { setTimeout as setTimeoutPromise } from "node:timers/promises"
 import { sendMcpServersUpdate } from "@core/controller/mcp/subscribeToMcpServers"
 import { GlobalFileNames } from "@core/storage/disk"
+import { WorkspaceRootManager } from "@core/workspace/WorkspaceRootManager"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js"
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
@@ -42,6 +43,7 @@ export class McpHub {
 	private getSettingsDirectoryPath: () => Promise<string>
 	private clientVersion: string
 	private telemetryService: TelemetryService
+	private workspaceManager?: WorkspaceRootManager
 
 	private settingsWatcher?: FSWatcher
 	private fileWatchers: Map<string, FSWatcher> = new Map()
@@ -64,11 +66,13 @@ export class McpHub {
 		getSettingsDirectoryPath: () => Promise<string>,
 		clientVersion: string,
 		telemetryService: TelemetryService,
+		workspaceManager?: WorkspaceRootManager,
 	) {
 		this.getMcpServersPath = getMcpServersPath
 		this.getSettingsDirectoryPath = getSettingsDirectoryPath
 		this.clientVersion = clientVersion
 		this.telemetryService = telemetryService
+		this.workspaceManager = workspaceManager
 		this.watchMcpSettingsFile()
 		this.initializeMcpServers()
 	}
@@ -204,9 +208,26 @@ export class McpHub {
 					version: this.clientVersion,
 				},
 				{
-					capabilities: {},
+					capabilities: {
+						roots: {
+							listChanged: true,
+						},
+					},
 				},
 			)
+
+			// Set up roots/list request handler
+			const ListRootsResultSchema = z.object({
+				method: z.literal("roots/list"),
+				params: z.object({}).optional(),
+			})
+
+			client.setRequestHandler(ListRootsResultSchema as any, async () => {
+				const roots = this.getRootsList()
+				return {
+					roots,
+				}
+			})
 
 			let transport: StdioClientTransport | SSEClientTransport | StreamableHTTPClientTransport
 
@@ -1136,6 +1157,62 @@ export class McpHub {
 	clearNotificationCallback(): void {
 		this.notificationCallback = undefined
 		//console.log("[MCP Debug] Notification callback cleared")
+	}
+
+	/**
+	 * Get the list of workspace roots in MCP format
+	 */
+	private getRootsList(): Array<{ uri: string; name?: string }> {
+		if (!this.workspaceManager) {
+			return []
+		}
+
+		const roots = this.workspaceManager.getRoots()
+		return roots.map((root) => ({
+			uri: `file://${root.path}`,
+			name: root.name,
+		}))
+	}
+
+	/**
+	 * Update the workspace manager and notify all servers about roots changes
+	 */
+	async setWorkspaceManager(workspaceManager: WorkspaceRootManager | undefined): Promise<void> {
+		const previousRoots = this.getRootsList()
+		this.workspaceManager = workspaceManager
+		const newRoots = this.getRootsList()
+
+		// Only notify if roots actually changed
+		if (!deepEqual(previousRoots, newRoots)) {
+			await this.notifyRootsChanged()
+		}
+	}
+
+	/**
+	 * Notify all connected servers that the roots list has changed
+	 */
+	private async notifyRootsChanged(): Promise<void> {
+		const roots = this.getRootsList()
+
+		for (const connection of this.connections) {
+			// Skip disabled servers or servers without clients
+			if (connection.server.disabled || !connection.client) {
+				continue
+			}
+
+			try {
+				await connection.client.notification({
+					method: "notifications/roots/list_changed",
+					params: undefined,
+				})
+				//console.log(`[MCP Debug] Sent roots/list_changed notification to ${connection.server.name}`)
+			} catch (error) {
+				console.error(
+					`[MCP Debug] Failed to send roots/list_changed notification to ${connection.server.name}:`,
+					error,
+				)
+			}
+		}
 	}
 
 	async dispose(): Promise<void> {

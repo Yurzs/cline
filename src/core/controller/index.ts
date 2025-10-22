@@ -90,6 +90,8 @@ export class Controller {
 					stateManager: this.stateManager,
 					detectRoots: detectWorkspaceRoots,
 				})
+				// Update MCP Hub with the workspace manager
+				await this.mcpHub.setWorkspaceManager(this.workspaceManager)
 			} catch (error) {
 				console.error("[Controller] Failed to initialize workspace manager:", error)
 			}
@@ -154,11 +156,14 @@ export class Controller {
 			this.startRemoteConfigTimer()
 		})
 
+		// Initialize McpHub without workspace manager initially
+		// It will be set when the workspace manager is initialized
 		this.mcpHub = new McpHub(
 			() => ensureMcpServersDirectoryExists(),
 			() => ensureSettingsDirectoryExists(),
 			ExtensionRegistryInfo.version,
 			telemetryService,
+			undefined,
 		)
 
 		// Clean up legacy checkpoints
@@ -283,6 +288,9 @@ export class Controller {
 			stateManager: this.stateManager,
 			detectRoots: detectWorkspaceRoots,
 		})
+		
+		// Update MCP Hub with the workspace manager
+		await this.mcpHub.setWorkspaceManager(this.workspaceManager)
 
 		const cwd = this.workspaceManager?.getPrimaryRoot()?.path || (await getCwd(getDesktopDir()))
 
